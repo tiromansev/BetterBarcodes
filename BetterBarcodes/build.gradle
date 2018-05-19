@@ -1,12 +1,7 @@
-plugins {
-    id 'com.github.wrdlbrnft.proguard-annotations' version '0.3.0.11'
-}
-
 apply plugin: 'com.android.library'
 
 android {
     compileSdkVersion 27
-    buildToolsVersion '27.0.3'
 
     defaultConfig {
         minSdkVersion 14
@@ -27,9 +22,6 @@ android {
 dependencies {
     compileOnly 'com.android.support:support-v4:27.1.1'
     compileOnly 'com.github.wrdlbrnft:proguard-annotations-api:0.3.0.11'
-
     implementation 'com.google.zxing:core:3.3.2'
     implementation 'com.github.wrdlbrnft:primitive-collections:0.3.0.2'
-
-    annotationProcessor 'com.github.wrdlbrnft:proguard-annotations-processor:0.3.0.11'
 }
