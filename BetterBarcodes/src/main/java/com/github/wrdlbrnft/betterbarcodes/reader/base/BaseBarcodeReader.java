@@ -5,6 +5,7 @@ import android.annotation.TargetApi;
 import android.app.Activity;
 import android.content.Context;
 import android.content.pm.PackageManager;
+import android.media.Image;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
@@ -13,15 +14,20 @@ import android.support.annotation.NonNull;
 import android.support.v4.app.ActivityCompat;
 import android.support.v4.app.Fragment;
 import android.support.v4.content.ContextCompat;
+import android.view.Surface;
+import android.view.WindowManager;
 
-import com.github.wrdlbrnft.betterbarcodes.BarcodeFormat;
 import com.github.wrdlbrnft.betterbarcodes.reader.BarcodeReader;
 import com.github.wrdlbrnft.betterbarcodes.reader.base.wrapper.BarcodeImageDecoder;
-import com.github.wrdlbrnft.betterbarcodes.reader.base.wrapper.BarcodeImageDecoders;
+import com.github.wrdlbrnft.betterbarcodes.reader.base.wrapper.BarcodeResult;
 import com.github.wrdlbrnft.betterbarcodes.reader.permissions.PermissionHandler;
 import com.github.wrdlbrnft.betterbarcodes.reader.permissions.PermissionRequest;
-import com.github.wrdlbrnft.betterbarcodes.utils.FormatUtils;
 import com.github.wrdlbrnft.betterbarcodes.utils.handlers.ThreadAwareHandler;
+import com.github.wrdlbrnft.simpletasks.runners.SimpleTaskRunner;
+import com.github.wrdlbrnft.simpletasks.runners.TaskRunner;
+import com.github.wrdlbrnft.simpletasks.tasks.Task;
+
+import java.util.List;
 
 /**
  * Created with Android Studio<br>
@@ -59,18 +65,22 @@ public abstract class BaseBarcodeReader implements BarcodeReader {
     private final Context mContext;
     private PermissionHandler mPermissionHandler = DUMMY_PERMISSION_HANDLER;
     private Callback mCallback = DUMMY_READER_CALLBACK;
+    private final WindowManager mWindowManager;
     private final ThreadAwareHandler mCameraHandler = new ThreadAwareHandler("BarcodeReaderCameraThread");
     private final ThreadAwareHandler mProcessingHandler = new ThreadAwareHandler("BarcodeReaderProcessingThread");
     private BarcodeImageDecoder mReader;
 
-    @BarcodeFormat
-    private int mFormat = BarcodeFormat.QR_CODE;
+    public interface CameraInfo {
+        int getSensorOrientation();
+        boolean isFrontFacing();
+        boolean isBackFacing();
+    }
 
     @State
     private volatile int mState = STATE_STOPPED;
 
     protected BaseBarcodeReader(Context context) {
-        mReader = BarcodeImageDecoders.forFormat(context, BarcodeFormat.QR_CODE);
+        mWindowManager = (WindowManager) context.getSystemService(Context.WINDOW_SERVICE);
         mContext = context;
     }
 
@@ -136,10 +146,17 @@ public abstract class BaseBarcodeReader implements BarcodeReader {
         mState = STATE_PREVIEWING;
     }
 
+    @Override
+    public void setBarcodeImageDecoder(BarcodeImageDecoder decoder) {
+        mReader = decoder;
+    }
+
     protected abstract void onStartPreview();
     protected abstract void onStartScanning();
     protected abstract void onStopScanning();
     protected abstract void onStopPreview();
+
+    protected abstract CameraInfo getCameraInfo();
 
     private void startBackgroundThread() {
         mCameraHandler.startThread();
@@ -156,10 +173,56 @@ public abstract class BaseBarcodeReader implements BarcodeReader {
         return mState;
     }
 
-    protected void notifyResult(String text) {
-        postOnMainThread(() -> mCallback.onResult(text));
-        stopScanning();
-        mCameraHandler.clearCallbacks(null);
+    private synchronized void notifyResult(List<BarcodeResult> results) {
+        if(mState >= STATE_SCANNING) {
+            stopScanning();
+            postOnMainThread(() -> mCallback.onResult(results));
+            mCameraHandler.clearCallbacks(null);
+        }
+    }
+
+    @BarcodeImageDecoder.Orientation
+    private int getDecoderOrientation() {
+        final int displayOrientation = getDisplayRotation();
+        final CameraInfo cameraInfo = getCameraInfo();
+        final int sensorOrientation = cameraInfo.getSensorOrientation();
+        final int relativeAngle = getRelativeImageOrientation(
+                displayOrientation,
+                sensorOrientation,
+                cameraInfo.isFrontFacing(),
+                false
+        );
+        return convertAngleToDecoderOrientation(relativeAngle);
+    }
+
+    protected Task<List<BarcodeResult>> submitImageData(byte[] data, int width, int height) {
+        if (mReader == null) {
+            return Task.withError(null);
+        }
+
+        final int orientation = getDecoderOrientation();
+        return mReader.decode(orientation, data, width, height)
+                .onResult(results -> {
+                    if (!results.isEmpty() && mState >= STATE_SCANNING) {
+                        notifyResult(results);
+                    }
+                });
+    }
+
+    @TargetApi(Build.VERSION_CODES.KITKAT)
+    protected Task<List<BarcodeResult>> submitImageData(Image image) {
+        if (mReader == null) {
+            image.close();
+            return Task.withError(null);
+        }
+
+        final int orientation = getDecoderOrientation();
+        return mReader.decode(orientation, image)
+                .onResult(results -> {
+                    if (!results.isEmpty()) {
+                        notifyResult(results);
+                    }
+                });
     }
 
     protected Handler getCameraHandler() {
@@ -206,19 +269,53 @@ public abstract class BaseBarcodeReader implements BarcodeReader {
         mCallback = callback != null ? callback : DUMMY_READER_CALLBACK;
     }
 
-    @Override
-    public void setFormat(@BarcodeFormat int... format) {
-        mFormat = FormatUtils.combine(format);
-        mReader = BarcodeImageDecoders.forFormat(mContext, format);
-    }
-
-    @Override
-    public int getFormat() {
-        return mFormat;
-    }
-
-    public BarcodeImageDecoder getCurrentReader() {
+    public BarcodeImageDecoder getReader() {
         return mReader;
+    }
+
+    @BarcodeImageDecoder.Orientation
+    private int convertAngleToDecoderOrientation(int angle) {
+        final int bracket = ((angle + 45) / 90) % 4;
+        switch (bracket) {
+            case 0:
+                return BarcodeImageDecoder.ORIENTATION_0;
+            case 1:
+                return BarcodeImageDecoder.ORIENTATION_90;
+            case 2:
+                return BarcodeImageDecoder.ORIENTATION_180;
+            case 3:
+                return BarcodeImageDecoder.ORIENTATION_270;
+            default:
+                return BarcodeImageDecoder.ORIENTATION_90;
+        }
+    }
+
+    private int getRelativeImageOrientation(int displayRotation, int sensorOrientation, boolean isFrontFacing, boolean compensateForMirroring) {
+        int result;
+        if (isFrontFacing) {
+            result = (sensorOrientation + displayRotation) % 360;
+            if (compensateForMirroring) {
+                result = (360 - result) % 360;
+            }
+        } else {
+            result = (sensorOrientation - displayRotation + 360) % 360;
+        }
+        return result;
+    }
+
+    private int getDisplayRotation() {
+        final int rotation = mWindowManager.getDefaultDisplay().getRotation();
+        switch (rotation) {
+            case Surface.ROTATION_0:
+                return 0;
+            case Surface.ROTATION_90:
+                return 90;
+            case Surface.ROTATION_180:
+                return 180;
+            case Surface.ROTATION_270:
+                return 270;
+        }
+        return 0;
     }
 
     private class PermissionRequestImpl implements PermissionRequest {

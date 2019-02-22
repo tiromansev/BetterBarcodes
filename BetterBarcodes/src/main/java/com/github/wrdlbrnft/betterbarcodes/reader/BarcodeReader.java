@@ -1,9 +1,13 @@
 package com.github.wrdlbrnft.betterbarcodes.reader;
 
 import com.github.wrdlbrnft.betterbarcodes.BarcodeFormat;
+import com.github.wrdlbrnft.betterbarcodes.reader.base.wrapper.BarcodeImageDecoder;
+import com.github.wrdlbrnft.betterbarcodes.reader.base.wrapper.BarcodeResult;
 import com.github.wrdlbrnft.betterbarcodes.reader.permissions.PermissionHandler;
 import com.github.wrdlbrnft.proguardannotations.KeepClass;
 import com.github.wrdlbrnft.proguardannotations.KeepClassMembers;
+
+import java.util.List;
 
 /**
  * Created with Android Studio<br>
@@ -16,7 +20,7 @@ public interface BarcodeReader {
 
     @KeepClassMembers
     interface Callback {
-        void onResult(String text);
+        void onResult(List<BarcodeResult> results);
     }
 
     void startPreview();
@@ -26,8 +30,5 @@ public interface BarcodeReader {
     void setCallback(Callback callback);
     void setCameraPermissionHandler(PermissionHandler handler);
 
-    void setFormat(@BarcodeFormat int... format);
-
-    @BarcodeFormat
-    int getFormat();
+    void setBarcodeImageDecoder(BarcodeImageDecoder decoder);
 }

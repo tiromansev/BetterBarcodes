@@ -8,11 +8,10 @@ import android.view.TextureView;
 import android.view.WindowManager;
 
 import com.github.wrdlbrnft.betterbarcodes.reader.base.BaseBarcodeReader;
-import com.github.wrdlbrnft.betterbarcodes.reader.base.wrapper.BarcodeImageDecoder;
 import com.github.wrdlbrnft.betterbarcodes.views.AspectRatioTextureView;
-import com.google.zxing.ReaderException;
 
 import java.io.IOException;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Created with Android Studio<br>
@@ -47,19 +46,19 @@ public class IceCreamSandwichBarcodeReader extends BaseBarcodeReader {
         }
     };
 
+    private final AtomicBoolean mReadyForFrame = new AtomicBoolean(true);
+
     private final Camera.PreviewCallback mPreviewCallback = (data, camera) -> {
         final Camera.Parameters parameters = camera.getParameters();
         final Camera.Size size = parameters.getPreviewSize();
         postOnProcessingThread(new Runnable() {
             @Override
             public void run() {
-                final BarcodeImageDecoder reader = getCurrentReader();
-                try {
-                    final String text = reader.decode(data, size.width, size.height);
-                    notifyResult(text);
-                } catch (ReaderException | NullPointerException | ArrayIndexOutOfBoundsException ignored) {
-                } finally {
-                    reader.reset();
+                if (mReadyForFrame.getAndSet(false)) {
+                    submitImageData(data, size.width, size.height)
+                            .onResult(result -> mReadyForFrame.set(true))
+                            .onCanceled(() -> mReadyForFrame.set(true))
+                            .onError(throwable -> mReadyForFrame.set(true));
                 }
                 postOnCameraThread(() -> {
                     if (getState() == STATE_SCANNING) {
@@ -88,6 +87,8 @@ public class IceCreamSandwichBarcodeReader extends BaseBarcodeReader {
 
     private final AspectRatioTextureView mTextureView;
     private final WindowManager mWindowManager;
+    private CameraInfo mCameraInfo;
+    private int mCameraId = -1;
 
     public IceCreamSandwichBarcodeReader(Context context, AspectRatioTextureView textureView) {
         super(context);
@@ -104,11 +105,28 @@ public class IceCreamSandwichBarcodeReader extends BaseBarcodeReader {
         }
     }
 
+    private int findRearFacingCameraId() {
+        final int numberOfCameras = Camera.getNumberOfCameras();
+        for (int i = 0; i < numberOfCameras; i++) {
+            Camera.CameraInfo info = new Camera.CameraInfo();
+            Camera.getCameraInfo(i, info);
+            if (info.facing == Camera.CameraInfo.CAMERA_FACING_BACK) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
     private void startCamera(SurfaceTexture surfaceTexture) {
         try {
             mTextureView.setAspectRatio(mTextureView.getWidth(), mTextureView.getWidth() * 16 / 10);
-            mCamera = Camera.open();
+            mCameraId = findRearFacingCameraId();
+            mCamera = Camera.open(mCameraId);
             if (mCamera != null) {
+                final Camera.CameraInfo info = new Camera.CameraInfo();
+                Camera.getCameraInfo(mCameraId, info);
+                mCameraInfo = new CameraInfoImpl(info);
+
                 mCameraActive = true;
                 mCamera.setDisplayOrientation(getDisplayOrientation());
                 mCamera.setPreviewTexture(surfaceTexture);
@@ -143,6 +161,35 @@ public class IceCreamSandwichBarcodeReader extends BaseBarcodeReader {
             mCamera.stopPreview();
             mCamera.release();
             mCamera = null;
+        }
+    }
+
+    @Override
+    protected CameraInfo getCameraInfo() {
+        return mCameraInfo;
+    }
+
+    private static class CameraInfoImpl implements CameraInfo {
+
+        private final Camera.CameraInfo mCameraInfo;
+
+        private CameraInfoImpl(Camera.CameraInfo cameraInfo) {
+            mCameraInfo = cameraInfo;
+        }
+
+        @Override
+        public int getSensorOrientation() {
+            return mCameraInfo.orientation;
+        }
+
+        @Override
+        public boolean isFrontFacing() {
+            return mCameraInfo.facing == Camera.CameraInfo.CAMERA_FACING_FRONT;
+        }
+
+        @Override
+        public boolean isBackFacing() {
+            return mCameraInfo.facing == Camera.CameraInfo.CAMERA_FACING_BACK;
         }
     }
 

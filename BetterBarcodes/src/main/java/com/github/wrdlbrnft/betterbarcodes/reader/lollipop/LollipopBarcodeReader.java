@@ -31,11 +31,7 @@ import android.view.WindowManager;
 import com.github.wrdlbrnft.betterbarcodes.reader.base.BaseBarcodeReader;
 import com.github.wrdlbrnft.betterbarcodes.reader.base.wrapper.BarcodeImageDecoder;
 import com.github.wrdlbrnft.betterbarcodes.views.AspectRatioTextureView;
-import com.google.zxing.ChecksumException;
-import com.google.zxing.FormatException;
-import com.google.zxing.NotFoundException;
 
-import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.Semaphore;
@@ -89,52 +85,28 @@ public class LollipopBarcodeReader extends BaseBarcodeReader {
         }
     };
 
-    private final ImageReader.OnImageAvailableListener mOnImageAvailableListener = new ImageReader.OnImageAvailableListener() {
+    private final Semaphore mSemaphore = new Semaphore(3);
 
-        @Override
-        public void onImageAvailable(ImageReader reader) {
-            try (Image image = reader.acquireLatestImage()) {
-                if (image == null) {
-                    return;
-                }
+    private final ImageReader.OnImageAvailableListener mOnImageAvailableListener = reader -> {
+        final Image image = reader.acquireLatestImage();
 
-                if (mReadyForFrame.getAndSet(false)) {
-                    final int count;
-                    final byte[][] planeBuffer;
-                    final int[][] strideBuffer;
-                    final Image.Plane[] planes = image.getPlanes();
-                    count = planes.length;
-                    planeBuffer = new byte[count][];
-                    strideBuffer = new int[count][];
-                    for (int i = 0; i < count; i++) {
-                        final Image.Plane plane = planes[i];
-                        final ByteBuffer buffer = plane.getBuffer();
-                        planeBuffer[i] = new byte[buffer.remaining()];
-                        strideBuffer[i] = new int[]{
-                                plane.getPixelStride(),
-                                plane.getRowStride()
-                        };
-                        buffer.get(planeBuffer[i]);
-                    }
-                    postOnProcessingThread(() -> {
-                        for (int i = 0; i < count; i++) {
-                            final byte[] planeData = planeBuffer[i];
-                            final int[] strideData = strideBuffer[i];
-                            final int rowStride = strideData[1];
-                            final BarcodeImageDecoder decoder = getCurrentReader();
-                            try {
-                                final String text = decoder.decode(planeData, rowStride, planeData.length / rowStride);
-                                notifyResult(text);
-                                return;
-                            } catch (NotFoundException | ChecksumException | FormatException ignored) {
-                            } finally {
-                                decoder.reset();
-                            }
-                        }
-                        mReadyForFrame.set(true);
-                    });
-                }
-            }
+        if(image == null) {
+            return;
+        }
+
+        final Image.Plane[] planes = image.getPlanes();
+        if (planes == null) {
+            image.close();
+            return;
+        }
+
+        if (mSemaphore.tryAcquire()) {
+            submitImageData(image)
+                    .onResult(result -> mSemaphore.release())
+                    .onCanceled(mSemaphore::release)
+                    .onError(throwable -> mSemaphore.release());
+        } else {
+            image.close();
         }
     };
 
@@ -171,6 +143,7 @@ public class LollipopBarcodeReader extends BaseBarcodeReader {
     private final Resources mResources;
 
     private Size mOutputSize;
+    private CameraInfo mCameraInfo;
     private CameraCaptureSession mCaptureSession;
     private CameraDevice mCameraDevice;
     private CaptureRequest.Builder mPreviewRequestBuilder;
@@ -230,7 +203,7 @@ public class LollipopBarcodeReader extends BaseBarcodeReader {
                 final int outputWidth = mOutputSize.getWidth();
                 final int outputHeight = mOutputSize.getHeight();
 
-                mImageReader = ImageReader.newInstance(width, height, IMAGE_FORMAT, 2);
+                mImageReader = ImageReader.newInstance(width, height, IMAGE_FORMAT, 6);
                 mImageReader.setOnImageAvailableListener(mOnImageAvailableListener, getCameraHandler());
 
                 if (orientation == Configuration.ORIENTATION_LANDSCAPE) {
@@ -239,11 +212,42 @@ public class LollipopBarcodeReader extends BaseBarcodeReader {
                     mTextureView.setAspectRatio(outputHeight, outputWidth);
                 }
 
+                mCameraInfo = new CameraInfoImpl(characteristics);
                 mCameraId = cameraId;
                 return;
             }
         } catch (CameraAccessException e) {
             e.printStackTrace();
+        }
+    }
+
+    @Override
+    protected CameraInfo getCameraInfo() {
+        return mCameraInfo;
+    }
+
+    @SuppressWarnings("ConstantConditions")
+    private static class CameraInfoImpl implements CameraInfo {
+
+        private final CameraCharacteristics mCameraCharacteristics;
+
+        private CameraInfoImpl(CameraCharacteristics cameraCharacteristics) {
+            mCameraCharacteristics = cameraCharacteristics;
+        }
+
+        @Override
+        public int getSensorOrientation() {
+            return mCameraCharacteristics.get(CameraCharacteristics.SENSOR_ORIENTATION);
+        }
+
+        @Override
+        public boolean isFrontFacing() {
+            return mCameraCharacteristics.get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_FRONT;
+        }
+
+        @Override
+        public boolean isBackFacing() {
+            return mCameraCharacteristics.get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_BACK;
         }
     }
 
